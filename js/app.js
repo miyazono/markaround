@@ -76,6 +76,132 @@
   var md = window.markdownit({ html: false, linkify: true, typographer: true });
   md.use(window.criticmarkupPlugin);
 
+  // --- Nesting-Aware CriticMarkup Scanner ---
+  // The markdown-it inline rule can't handle CriticMarkup that:
+  //   (a) spans block boundaries (e.g. {--## Heading--}), or
+  //   (b) contains nested CriticMarkup (e.g. {--text {++inner++}--}).
+  // This scanner finds regions correctly, then a pre/post-processing step
+  // around md.render() replaces them with placeholders before block parsing
+  // and restores styled HTML afterward.
+
+  function detectCriticOpener(source, i) {
+    var s = source.substring(i, i + 3);
+    if (s === '{++') return { type: 'addition', closer: '++}' };
+    if (s === '{--') return { type: 'deletion', closer: '--}' };
+    if (s === '{~~') return { type: 'substitution', closer: '~~}' };
+    if (s === '{>>') return { type: 'comment', closer: '<<}' };
+    if (s === '{==') return { type: 'highlight', closer: '==}' };
+    return null;
+  }
+
+  function findCriticClose(source, startPos, closer) {
+    var i = startPos;
+    while (i <= source.length - 3) {
+      if (source.substring(i, i + 3) === closer) return i + 3;
+      if (source[i] === '{') {
+        var nested = detectCriticOpener(source, i);
+        if (nested) {
+          var nestedEnd = findCriticClose(source, i + 3, nested.closer);
+          if (nestedEnd !== -1) { i = nestedEnd; continue; }
+        }
+      }
+      i++;
+    }
+    return -1;
+  }
+
+  function findCriticRegions(source) {
+    var regions = [];
+    var i = 0;
+    while (i < source.length) {
+      if (source[i] === '{') {
+        var opener = detectCriticOpener(source, i);
+        if (opener) {
+          var end = findCriticClose(source, i + 3, opener.closer);
+          if (end !== -1) {
+            regions.push({ start: i, end: end, type: opener.type,
+              fullMarkup: source.substring(i, end) });
+            i = end;
+            continue;
+          }
+        }
+      }
+      i++;
+    }
+    return regions;
+  }
+
+  // Find the top-level ~> separator in substitution content (skipping nested markup)
+  function findTopLevelSeparator(content) {
+    var i = 0;
+    while (i < content.length - 1) {
+      if (content[i] === '~' && content[i + 1] === '>') return i;
+      if (content[i] === '{') {
+        var opener = detectCriticOpener(content, i);
+        if (opener) {
+          var end = findCriticClose(content, i + 3, opener.closer);
+          if (end !== -1) { i = end; continue; }
+        }
+      }
+      i++;
+    }
+    return -1;
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function renderCriticRegion(region) {
+    var markupAttr = escapeHtml(region.fullMarkup);
+    var offset = region.start;
+    var content = region.fullMarkup.substring(3, region.fullMarkup.length - 3);
+    var controls;
+
+    switch (region.type) {
+      case 'addition':
+        controls = '<span class="critic-controls">'
+          + '<button class="critic-accept" title="Accept addition">&#10003;</button>'
+          + '<button class="critic-reject" title="Reject addition">&#10005;</button></span>';
+        return '<span class="critic-addition" data-markup="' + markupAttr + '" data-offset="' + offset + '">'
+          + md.renderInline(content) + controls + '</span>';
+
+      case 'deletion':
+        controls = '<span class="critic-controls">'
+          + '<button class="critic-accept" title="Accept deletion">&#10003;</button>'
+          + '<button class="critic-reject" title="Reject deletion">&#10005;</button></span>';
+        return '<span class="critic-deletion" data-markup="' + markupAttr + '" data-offset="' + offset + '">'
+          + escapeHtml(content) + controls + '</span>';
+
+      case 'substitution':
+        var sep = findTopLevelSeparator(content);
+        var oldText = sep !== -1 ? content.substring(0, sep) : content;
+        var newText = sep !== -1 ? content.substring(sep + 2) : '';
+        controls = '<span class="critic-controls">'
+          + '<button class="critic-accept" title="Accept change">&#10003;</button>'
+          + '<button class="critic-reject" title="Reject change">&#10005;</button></span>';
+        return '<span class="critic-substitution" data-markup="' + markupAttr + '" data-offset="' + offset + '">'
+          + '<span class="critic-deletion">' + escapeHtml(oldText) + '</span>'
+          + '<span class="critic-addition">' + md.renderInline(newText) + '</span>'
+          + controls + '</span>';
+
+      case 'comment':
+        controls = '<span class="critic-controls">'
+          + '<button class="critic-accept" title="Remove comment">&#10003;</button>'
+          + '<button class="critic-reject" title="Remove comment">&#10005;</button></span>';
+        return '<span class="critic-comment-marker" data-markup="' + markupAttr + '" data-offset="' + offset
+          + '" data-comment-text="' + escapeHtml(content) + '">' + controls + '</span>';
+
+      case 'highlight':
+        controls = '<span class="critic-controls">'
+          + '<button class="critic-accept" title="Accept highlight">&#10003;</button>'
+          + '<button class="critic-reject" title="Reject highlight">&#10005;</button></span>';
+        return '<span class="critic-highlight" data-markup="' + markupAttr + '" data-offset="' + offset + '">'
+          + md.renderInline(content) + controls + '</span>';
+    }
+    return escapeHtml(region.fullMarkup);
+  }
+
   // --- DOM References ---
   var dropZone = document.getElementById('dropZone');
   var inputArea = document.getElementById('inputArea');
@@ -108,12 +234,36 @@
   var currentLayout = 'both';
 
   // --- Sample Content ---
-  var SAMPLE = '# CriticMarkup Demo\n\nThis is a sample document demonstrating {++all five types of++} CriticMarkup.\n\n## Tracked Changes\n\nHere is some text that has {--been carelessly--} written and needs editing.\n\nThe word {~~colour~>color~~} was changed to American English.\n\n{++This entire paragraph was added during review. It contains **bold** and *italic* text to show that markdown renders inside additions.++}\n\n## Comments and Highlights\n\nThis is {==an important claim==}{>>Do we have a source for this? Needs citation.<<} that reviewers flagged.\n\nAnother paragraph with a {>>Nice work on this section!<<} comment.\n\n## Multiple Changes Per Line\n\nNormal text {++with an addition++} and {--a deletion--} on the same line, plus a {~~typo~>correction~~}.\n\n## Edge Cases\n\n{++First++} word addition. Last word {--deletion--}.\n\nA paragraph with {++multiple++} additions of the {++same word++} to test offset tracking.\n';
+  var SAMPLE = '# CriticMarkup Demo\n\nThis is a sample document demonstrating {++all five types of++} CriticMarkup.\n\n## Tracked Changes\n\nHere is some text that has {--been carelessly--} written and needs editing.\n\nThe word {~~colour~>color~~} was changed to American English.\n\n{++This entire paragraph was added during review. It contains **bold** and *italic* text to show that markdown renders inside additions.++}\n\n## Comments and Highlights\n\nThis is {==an important claim==}{>>Do we have a source for this? Needs citation.<<} that reviewers flagged.\n\nAnother paragraph with a {>>Nice work on this section!<<} comment.\n\n## Multiple Changes Per Line\n\nNormal text {++with an addition++} and {--a deletion--} on the same line, plus a {~~typo~>correction~~}.\n\n## Nested Changes\n\n{--## Multiple Changes Per Line--}\n\n{--\nNormal text {++with an addition++} and {--a deletion--} on the same line, plus a {~~typo~>correction~~}.\n--}\n\n## Edge Cases\n\n{++First++} word addition. Last word {--deletion--}.\n\nA paragraph with {++multiple++} additions of the {++same word++} to test offset tracking.\n';
 
   // --- Render Pipeline ---
   function render() {
-    var html = md.render(state.source);
-    renderedView.innerHTML = html;
+    var regions = findCriticRegions(state.source);
+
+    if (regions.length === 0) {
+      renderedView.innerHTML = md.render(state.source);
+    } else {
+      // Replace CriticMarkup regions with placeholders before markdown-it
+      // sees the source, so block-level syntax inside them (e.g. ## headings)
+      // doesn't trigger block parsing.
+      var processed = '';
+      var lastEnd = 0;
+      for (var r = 0; r < regions.length; r++) {
+        processed += state.source.substring(lastEnd, regions[r].start);
+        processed += '%%CRITIC_' + r + '%%';
+        lastEnd = regions[r].end;
+      }
+      processed += state.source.substring(lastEnd);
+
+      var html = md.render(processed);
+
+      // Restore styled CriticMarkup HTML in place of placeholders
+      for (var r = 0; r < regions.length; r++) {
+        html = html.replace('%%CRITIC_' + r + '%%', renderCriticRegion(regions[r]));
+      }
+      renderedView.innerHTML = html;
+    }
+
     updateSuggestionCount();
     updateToolbar();
     positionComments();
@@ -125,9 +275,7 @@
   }
 
   function updateSuggestionCount() {
-    var RE_ALL = /\{\+\+[\s\S]+?\+\+\}|\{--[\s\S]+?--\}|\{~~[\s\S]+?~>[\s\S]+?~~\}|\{>>[\s\S]+?<<\}|\{==[\s\S]+?==\}/g;
-    var matches = state.source.match(RE_ALL);
-    var count = matches ? matches.length : 0;
+    var count = findCriticRegions(state.source).length;
     if (count > 0) {
       suggestionCount.textContent = count + ' suggestion' + (count !== 1 ? 's' : '');
       suggestionCount.classList.add('visible');
@@ -196,43 +344,58 @@
 
   // --- Accept / Reject ---
   function acceptMarkup(originalMarkup) {
-    var match;
-    if ((match = originalMarkup.match(/^\{\+\+([\s\S]+?)\+\+\}$/))) return match[1];
-    if ((match = originalMarkup.match(/^\{--([\s\S]+?)--\}$/))) return '';
-    if ((match = originalMarkup.match(/^\{~~[\s\S]+?~>([\s\S]+?)~~\}$/))) return match[1];
-    if ((match = originalMarkup.match(/^\{>>([\s\S]+?)<<\}$/))) return '';
-    if ((match = originalMarkup.match(/^\{==([\s\S]+?)==\}$/))) return match[1];
+    var opener = detectCriticOpener(originalMarkup, 0);
+    if (!opener) return originalMarkup;
+    var content = originalMarkup.substring(3, originalMarkup.length - 3);
+    switch (opener.type) {
+      case 'addition':    return content;
+      case 'deletion':    return '';
+      case 'substitution':
+        var sep = findTopLevelSeparator(content);
+        return sep !== -1 ? content.substring(sep + 2) : '';
+      case 'comment':     return '';
+      case 'highlight':   return content;
+    }
     return originalMarkup;
   }
 
   function rejectMarkup(originalMarkup) {
-    var match;
-    if ((match = originalMarkup.match(/^\{\+\+([\s\S]+?)\+\+\}$/))) return '';
-    if ((match = originalMarkup.match(/^\{--([\s\S]+?)--\}$/))) return match[1];
-    if ((match = originalMarkup.match(/^\{~~([\s\S]+?)~>[\s\S]+?~~\}$/))) return match[1];
-    if ((match = originalMarkup.match(/^\{>>([\s\S]+?)<<\}$/))) return '';
-    if ((match = originalMarkup.match(/^\{==([\s\S]+?)==\}$/))) return match[1];
+    var opener = detectCriticOpener(originalMarkup, 0);
+    if (!opener) return originalMarkup;
+    var content = originalMarkup.substring(3, originalMarkup.length - 3);
+    switch (opener.type) {
+      case 'addition':    return '';
+      case 'deletion':    return content;
+      case 'substitution':
+        var sep = findTopLevelSeparator(content);
+        return sep !== -1 ? content.substring(0, sep) : content;
+      case 'comment':     return '';
+      case 'highlight':   return content;
+    }
     return originalMarkup;
   }
 
   function acceptAll() {
-    state.source = state.source
-      .replace(/\{\+\+([\s\S]+?)\+\+\}/g, '$1')
-      .replace(/\{--([\s\S]+?)--\}/g, '')
-      .replace(/\{~~[\s\S]+?~>([\s\S]+?)~~\}/g, '$1')
-      .replace(/\{>>([\s\S]+?)<<\}/g, '')
-      .replace(/\{==([\s\S]+?)==\}/g, '$1');
+    // Loop to handle nested markup exposed after outer regions are resolved
+    var regions;
+    while ((regions = findCriticRegions(state.source)).length > 0) {
+      for (var i = regions.length - 1; i >= 0; i--) {
+        var r = regions[i];
+        state.source = state.source.slice(0, r.start) + acceptMarkup(r.fullMarkup) + state.source.slice(r.end);
+      }
+    }
     render();
     syncEditorIfNeeded();
   }
 
   function rejectAll() {
-    state.source = state.source
-      .replace(/\{\+\+([\s\S]+?)\+\+\}/g, '')
-      .replace(/\{--([\s\S]+?)--\}/g, '$1')
-      .replace(/\{~~([\s\S]+?)~>[\s\S]+?~~\}/g, '$1')
-      .replace(/\{>>([\s\S]+?)<<\}/g, '')
-      .replace(/\{==([\s\S]+?)==\}/g, '$1');
+    var regions;
+    while ((regions = findCriticRegions(state.source)).length > 0) {
+      for (var i = regions.length - 1; i >= 0; i--) {
+        var r = regions[i];
+        state.source = state.source.slice(0, r.start) + rejectMarkup(r.fullMarkup) + state.source.slice(r.end);
+      }
+    }
     render();
     syncEditorIfNeeded();
   }
