@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Markaround</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "codemirror": "https://esm.sh/*codemirror@6.0.1",
+      "@codemirror/": "https://esm.sh/*@codemirror/",
+      "@lezer/": "https://esm.sh/*@lezer/",
+      "style-mod": "https://esm.sh/style-mod@4.1.2",
+      "w3c-keyname": "https://esm.sh/w3c-keyname@2.2.8",
+      "crelt": "https://esm.sh/crelt@1.0.6"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header class="toolbar">
+    <div class="toolbar-left">
+      <h1 class="toolbar-title">Markaround</h1>
+      <span class="suggestion-count" id="suggestionCount"></span>
+    </div>
+    <div class="toolbar-center">
+      <div class="layout-toggles">
+        <button id="btnLayoutBoth" class="layout-toggle active" title="Editor + Preview">Both</button>
+        <button id="btnLayoutEditor" class="layout-toggle" title="Editor Only">Editor</button>
+        <button id="btnLayoutPreview" class="layout-toggle" title="Preview Only">Preview</button>
+      </div>
+    </div>
+    <div class="toolbar-right">
+      <button id="btnSuggestionMode" class="toolbar-btn btn-suggestion" disabled title="Toggle Suggestion Mode">Suggest</button>
+      <button id="btnAddComment" class="toolbar-btn" disabled title="Add Comment (Cmd+Shift+M)">Comment</button>
+      <span class="toolbar-separator"></span>
+      <button id="btnAcceptAll" class="toolbar-btn btn-accept" disabled>Accept All</button>
+      <button id="btnRejectAll" class="toolbar-btn btn-reject" disabled>Reject All</button>
+      <button id="btnDownload" class="toolbar-btn" disabled>Download</button>
+    </div>
+  </header>
+
+  <div id="fileBar" class="file-bar" hidden>
+    <span class="file-bar-name" id="fileBarName">document.md</span>
+    <div class="file-bar-actions">
+      <button id="btnNewFile" class="file-bar-btn">Open File</button>
+      <button id="btnPasteNew" class="file-bar-btn">Paste New</button>
+    </div>
+  </div>
+
+  <input type="file" id="filePicker" accept=".md,.markdown,.txt" hidden>
+
+  <!-- Drop zone (shown before content is loaded) -->
+  <div id="dropZone" class="drop-zone">
+    <div class="drop-zone-prompt">
+      <p class="drop-zone-title">Drop a .md file here</p>
+      <p class="drop-zone-subtitle">or paste CriticMarkup text below</p>
+      <textarea id="inputArea" class="input-textarea" placeholder="Paste markdown with CriticMarkup here..."></textarea>
+      <div class="drop-zone-actions">
+        <button id="btnLoadFile" class="toolbar-btn">Choose File</button>
+        <button id="btnLoadSample" class="toolbar-btn">Load Sample</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Split-pane layout (shown after content is loaded) -->
+  <main id="mainLayout" class="main-layout layout-both" hidden>
+    <div class="pane editor-pane" id="editorPane">
+      <div id="editorContainer"></div>
+    </div>
+    <div class="resize-handle" id="resizeHandle"></div>
+    <div class="pane preview-pane" id="previewPane">
+      <div id="renderedView" class="rendered-view"></div>
+    </div>
+    <aside id="commentSidebar" class="comment-sidebar"></aside>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
+  <script src="js/criticmarkup-plugin.js"></script>
+  <script src="js/app.js"></script>
+  <!-- Editor module loads async; silently skipped on file:// protocol -->
+  <script type="module" src="js/editor-loader.js"></script>
+</body>
+</html>
