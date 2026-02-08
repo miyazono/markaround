@@ -156,6 +156,11 @@
     var markupAttr = escapeHtml(region.fullMarkup);
     var offset = region.start;
     var content = region.fullMarkup.substring(3, region.fullMarkup.length - 3);
+    // If heading prefix was extracted during placeholder generation, strip it
+    // from the displayed content (the <h2> etc. already provides the styling).
+    var displayContent = region._headingPrefix
+      ? content.replace(/^\n+|\n+$/g, '').substring(region._headingPrefix.length)
+      : content;
     var controls;
 
     switch (region.type) {
@@ -164,14 +169,14 @@
           + '<button class="critic-accept" title="Accept addition">&#10003;</button>'
           + '<button class="critic-reject" title="Reject addition">&#10005;</button></span>';
         return '<span class="critic-addition" data-markup="' + markupAttr + '" data-offset="' + offset + '">'
-          + md.renderInline(content) + controls + '</span>';
+          + md.renderInline(displayContent) + controls + '</span>';
 
       case 'deletion':
         controls = '<span class="critic-controls">'
           + '<button class="critic-accept" title="Accept deletion">&#10003;</button>'
           + '<button class="critic-reject" title="Reject deletion">&#10005;</button></span>';
         return '<span class="critic-deletion" data-markup="' + markupAttr + '" data-offset="' + offset + '">'
-          + escapeHtml(content) + controls + '</span>';
+          + escapeHtml(displayContent) + controls + '</span>';
 
       case 'substitution':
         var sep = findTopLevelSeparator(content);
@@ -197,7 +202,7 @@
           + '<button class="critic-accept" title="Accept highlight">&#10003;</button>'
           + '<button class="critic-reject" title="Reject highlight">&#10005;</button></span>';
         return '<span class="critic-highlight" data-markup="' + markupAttr + '" data-offset="' + offset + '">'
-          + md.renderInline(content) + controls + '</span>';
+          + md.renderInline(displayContent) + controls + '</span>';
     }
     return escapeHtml(region.fullMarkup);
   }
@@ -250,7 +255,26 @@
       var lastEnd = 0;
       for (var r = 0; r < regions.length; r++) {
         processed += state.source.substring(lastEnd, regions[r].start);
-        processed += '%%CRITIC_' + r + '%%';
+        var placeholder = '%%CRITIC_' + r + '%%';
+
+        // If the content is a single-line heading and the region starts a line,
+        // preserve the heading prefix (e.g. "## ") in the placeholder so
+        // markdown-it renders it inside an <h2> etc.
+        var rtype = regions[r].type;
+        if (rtype === 'addition' || rtype === 'deletion' || rtype === 'highlight') {
+          var inner = regions[r].fullMarkup.substring(3, regions[r].fullMarkup.length - 3);
+          var trimmed = inner.replace(/^\n+|\n+$/g, '');
+          var atLineStart = (regions[r].start === 0 || state.source[regions[r].start - 1] === '\n');
+          if (atLineStart && !trimmed.includes('\n')) {
+            var hm = trimmed.match(/^(#{1,6}\s+)/);
+            if (hm) {
+              regions[r]._headingPrefix = hm[1];
+              placeholder = hm[1] + placeholder;
+            }
+          }
+        }
+
+        processed += placeholder;
         lastEnd = regions[r].end;
       }
       processed += state.source.substring(lastEnd);
