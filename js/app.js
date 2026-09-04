@@ -16,30 +16,41 @@
     var dirty = false;
     var currentKey = null;
     var getSource = null;
+    var onSave = null;
 
-    function start(fileName, sourceFn) {
+    function doSave() {
+      var source = getSource();
+      if (source) {
+        var ts = Date.now();
+        try {
+          localStorage.setItem(currentKey, JSON.stringify({ source: source, timestamp: ts }));
+          if (onSave) onSave(ts);
+        } catch (e) { /* quota exceeded, ignore */ }
+      }
+      dirty = false;
+    }
+
+    function start(fileName, sourceFn, onSaveFn) {
       stop();
       currentKey = PREFIX + (fileName || 'document.md');
       getSource = sourceFn;
+      onSave = onSaveFn || null;
       dirty = false;
       timer = setInterval(function () {
-        if (dirty && getSource) {
-          var source = getSource();
-          if (source) {
-            try {
-              localStorage.setItem(currentKey, JSON.stringify({ source: source, timestamp: Date.now() }));
-            } catch (e) { /* quota exceeded, ignore */ }
-          }
-          dirty = false;
-        }
+        if (dirty && getSource) doSave();
       }, 3000);
     }
 
     function markDirty() { dirty = true; }
 
+    // Immediate save for moments when the 3s tick may never come (tab close/hide)
+    function flush() {
+      if (dirty && getSource && currentKey) doSave();
+    }
+
     function stop() {
       if (timer) { clearInterval(timer); timer = null; }
-      dirty = false; currentKey = null; getSource = null;
+      dirty = false; currentKey = null; getSource = null; onSave = null;
     }
 
     function check(fileName) {
@@ -57,7 +68,25 @@
       localStorage.removeItem(PREFIX + (fileName || 'document.md'));
     }
 
-    return { start: start, markDirty: markDirty, stop: stop, check: check, clear: clear };
+    // All stored autosaves, newest first (for the landing-page recovery list)
+    function list() {
+      var items = [];
+      for (var i = 0; i < localStorage.length; i++) {
+        var key = localStorage.key(i);
+        if (key && key.indexOf(PREFIX) === 0) {
+          try {
+            var data = JSON.parse(localStorage.getItem(key));
+            if (data && data.source && data.timestamp) {
+              items.push({ fileName: key.substring(PREFIX.length), timestamp: data.timestamp, source: data.source });
+            }
+          } catch (e) { /* ignore */ }
+        }
+      }
+      items.sort(function (a, b) { return b.timestamp - a.timestamp; });
+      return items;
+    }
+
+    return { start: start, markDirty: markDirty, flush: flush, stop: stop, check: check, clear: clear, list: list };
   })();
 
   // --- State ---
@@ -65,6 +94,10 @@
     source: '',
     fileName: 'document.md',
   };
+
+  // Last content known to exist outside the browser (loaded file or download).
+  // Anything differing from this is "unsaved" for the close-tab warning.
+  var savedBaseline = '';
 
   // --- Editor (set when editor-loader.js fires 'editor-ready') ---
   var Editor = null; // window.CriticEditor
@@ -219,6 +252,8 @@
   var filePicker = document.getElementById('filePicker');
   var fileBar = document.getElementById('fileBar');
   var fileBarName = document.getElementById('fileBarName');
+  var fileBarAutosave = document.getElementById('fileBarAutosave');
+  var recoveryList = document.getElementById('recoveryList');
   var resizeHandle = document.getElementById('resizeHandle');
 
   var btnAcceptAll = document.getElementById('btnAcceptAll');
@@ -606,10 +641,12 @@
   function loadContent(text, fileName) {
     state.source = text;
     state.fileName = fileName || 'document.md';
+    savedBaseline = text;
     dropZone.hidden = true;
     mainLayout.hidden = false;
     fileBar.hidden = false;
     fileBarName.textContent = state.fileName;
+    fileBarAutosave.textContent = '';
 
     // Check for autosave
     var saved = Autosave.check(state.fileName);
@@ -623,17 +660,21 @@
 
     setupEditorPane();
     render();
-    Autosave.start(state.fileName, function () { return state.source; });
+    Autosave.start(state.fileName, function () { return state.source; }, function (ts) {
+      fileBarAutosave.textContent = 'autosaved ' + new Date(ts).toLocaleTimeString();
+    });
     updateToolbar();
   }
 
   function showDropZone() {
+    Autosave.flush();
     dropZone.hidden = false;
     mainLayout.hidden = true;
     fileBar.hidden = true;
     inputArea.value = '';
     inputArea.focus();
     Autosave.stop();
+    renderRecoveryList();
 
     if (editorView) {
       editorView.destroy();
@@ -801,6 +842,8 @@
 
   btnDownload.addEventListener('click', function () {
     Autosave.clear(state.fileName);
+    savedBaseline = state.source;
+    fileBarAutosave.textContent = 'downloaded';
     var blob = new Blob([state.source], { type: 'text/markdown' });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
@@ -899,6 +942,60 @@
       document.addEventListener('mouseup', onMouseUp);
     });
   })();
+
+  // --- Landing-Page Recovery List ---
+  function renderRecoveryList() {
+    var items = Autosave.list();
+    if (items.length === 0) {
+      recoveryList.hidden = true;
+      recoveryList.innerHTML = '';
+      return;
+    }
+    recoveryList.hidden = false;
+    var html = '<p class="recovery-title">Unsaved work from previous sessions</p>';
+    items.forEach(function (item, i) {
+      html += '<div class="recovery-item">'
+        + '<span class="recovery-name">' + md.utils.escapeHtml(item.fileName) + '</span>'
+        + '<span class="recovery-time">' + new Date(item.timestamp).toLocaleString() + '</span>'
+        + '<span class="recovery-actions">'
+        + '<button class="file-bar-btn recovery-restore" data-index="' + i + '">Restore</button>'
+        + '<button class="file-bar-btn recovery-discard" data-index="' + i + '">Discard</button>'
+        + '</span></div>';
+    });
+    recoveryList.innerHTML = html;
+  }
+
+  recoveryList.addEventListener('click', function (e) {
+    var restoreBtn = e.target.closest('.recovery-restore');
+    var discardBtn = e.target.closest('.recovery-discard');
+    if (!restoreBtn && !discardBtn) return;
+    var items = Autosave.list();
+    var item = items[parseInt((restoreBtn || discardBtn).getAttribute('data-index'), 10)];
+    if (!item) return;
+    if (restoreBtn) {
+      loadContent(item.source, item.fileName);
+    } else {
+      Autosave.clear(item.fileName);
+      renderRecoveryList();
+    }
+  });
+
+  renderRecoveryList();
+
+  // --- Unsaved-Work Protection ---
+  // Flush pending autosave whenever the tab may be going away, and warn on
+  // close if the content differs from what was loaded or last downloaded.
+  window.addEventListener('beforeunload', function (e) {
+    Autosave.flush();
+    if (!mainLayout.hidden && state.source !== savedBaseline) {
+      e.preventDefault();
+      e.returnValue = ''; // required by Chrome to show the native dialog
+    }
+  });
+  window.addEventListener('pagehide', function () { Autosave.flush(); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') Autosave.flush();
+  });
 
   // --- Editor Ready Event ---
   // Fired by editor-loader.js (ES module) after CodeMirror loads.
